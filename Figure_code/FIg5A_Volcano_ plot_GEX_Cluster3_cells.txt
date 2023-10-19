@@ -1,0 +1,193 @@
+rm(list = ls())
+library(plyr)
+library(edgeR)
+library(compareGroups)
+library(dbscan)
+library(MAST)
+library(ggsignif)
+library(monocle3)
+library(dplyr)
+library(geosphere)
+library(RColorBrewer)
+library(gtools)
+library(ggrepel)
+library(ggplot2); library(reshape2); theme_set(theme_bw(26) + theme(panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank()) +
+                              theme(legend.key = element_blank()))
+update_geom_defaults("point", aes(size = 4))
+
+## override errors in circlize and Monocle3
+
+old_ops <- options(warn = 1) # if warning = 2, warning is converted to error
+options(old_ops)
+
+## load files
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/data") # folder on Desktop
+
+counts_uncorrected <- read.table("combined_counts_filtered_for_batchcorr.csv", header=TRUE,sep= ",", row.names=1)
+
+ens2hgnc = readRDS("ens2hgnc.RDS")
+
+### subset data
+
+#design = read.delim("design_for_peter.txt", stringsAsFactors = F, header=TRUE, row.names = 1)
+
+filename = "Seurat_meta.data_w_cell_identity_and_cell_cycle.csv"
+
+design = read.csv(filename, stringsAsFactors = F)
+colnames(design)[1] = c("libID")
+row.names(design) = design$libID
+
+design$libID = row.names(design)
+design$batch4 = gsub(" ","_", design$batch4)
+design$batch4 = factor(design$batch4)
+
+frozenlibs <- design$libId[ design$batch4 != "P91 fresh"]
+
+counts_uncorrected = subset(counts_uncorrected, select = colnames(counts_uncorrected) %in% design$libID)
+
+b = c("P91_frozen", "P168_frozen_1") ## remove P168-2
+#design = subset(design, design$batch4 %in% b & design$CD45RA == "FALSE") # reduce from 1994 to 946.
+design = subset(design, !design$batch4 %in% b) # 
+
+design$batch4 = as.character(design$batch4)
+design$batch4 = factor(design$batch4)
+design$CD45RA = as.character(design$CD45RA)
+design$CD45RA = factor(design$CD45RA)
+design$project = factor(design$project)
+
+exponentiated <- counts_uncorrected[,frozenlibs]
+exponentiated <- subset(exponentiated, select = colnames(exponentiated) %in% design$libID)
+gm <- data.frame( gene_short_name=ens2hgnc[rownames(exponentiated)], Ensembl.ID=rownames(exponentiated) )
+rownames(gm) <- gm$Ensembl.ID
+gm <- gm[rownames(exponentiated),]
+
+gm <- gm[rownames(exponentiated),]
+
+## load clean anno
+
+anno.clean = read.delim("P168_clean_anno_from_research_database04212020.txt", stringsAsFactors = F)
+anno.clean$libID = anno.clean$libid
+
+idKey = read.csv("T1DAL_id_key.csv", stringsAsFactors = F)
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+
+slopes.full = read.csv("T1DAL_cpeptide_rates.csv", stringsAsFactors = F)
+slopes.full[,2] = NULL
+colnames(slopes.full)[2] = c("slope")
+
+slopes = subset(slopes.full, participant_id %in% anno.clean$participant_id)
+slopes[is.na(slopes)] = -1
+slopes$rate = ifelse(slopes$slope >median(slopes$slope), "S", "F")
+slopes$libID = anno.clean$libID[match(slopes$participant_id, anno.clean$participant_id)]
+
+anno.clean$rate = slopes$rate[match(anno.clean$participant_id, slopes$participant_id)]
+anno.clean$slope = slopes$slope[match(anno.clean$participant_id, slopes$participant_id)]
+
+demo = read.delim("ADLB1_2019-04-26_10-54-53_viral_load.txt", stringsAsFactors = F)
+
+design$sorter = anno.clean$sorter[match(design$libID, anno.clean$libID)]
+design$rd = anno.clean$received_date[match(design$libID, anno.clean$libID)]
+design$rate = anno.clean$rate[match(design$libID, anno.clean$libID)]
+design$slope = anno.clean$slope[match(design$libID, anno.clean$libID)]
+design$participant_id = anno.clean$participant_id[match(design$libID, anno.clean$libID)]
+design$Treatment = demo$Treatment[match(design$participant_id, demo$Participant.ID)]
+design$cluster = NULL
+
+### load Monocle object
+
+cds = readRDS("cds_no_trajectory_P168_JCI_Insight.rds")
+
+## correct UMAP orientation. Sometimes orientation is reversed, but this is arbitrary. If necesssry, orrect by multiplying UMAP coordinates by -1.
+
+reducedDims(cds)$UMAP = -1*reducedDims(cds)$UMAP
+
+################################
+## Evaluate gene expresion differences in cluster 3 versus non-cluster 3
+
+## perform linear regression
+clus = c(3)
+cds_subset <- cds # 1014
+
+cds_subset <- cds[,!colData(cds)$Clusters == clus] # 803
+
+colData(cds)$clus3 = ifelse(!colData(cds)$libid %in% colData(cds_subset)$libid, "TRUE", "FALSE")
+
+table(colData(cds_subset)$clus3)
+
+#FALSE  TRUE 
+#  801   211
+
+## regression analysis
+
+gene_fits <- fit_models(cds, model_formula_str = "~clus3")
+fit_coefs <- coefficient_table(gene_fits)
+
+emb_time_terms <- fit_coefs %>% filter(term == "clus3TRUE")
+
+toSave2 = emb_time_terms %>% filter (q_value < 5) %>%
+         select(gene_short_name, term, q_value, estimate) %>% arrange(q_value)
+
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/data") # folder on Desktop
+		 
+filename = "P168_cluster_3_pos_vs_neg_GEX.txt"# for cluster 3 only
+#write.table(toSave2, filename, quote = F, col.names = T, row.names = F, sep = "\t")	 
+
+## or, to speed things up, siimply load prercalculated linear regression table
+
+clus3 = read.delim("P168_cluster_3_pos_vs_neg_GEX.txt", stringsAsFactors = F)
+
+to.plot.name = c("clus3")
+to.plot = get(to.plot.name)
+to.plot = data.frame(toSave2)
+row.names(to.plot) = to.plot$gene_short_name
+
+##load modules
+
+mod.genes1 = c("TNFRSF9", "BHLHE40", "IL2RA")
+mod.genes2 =c("IL7R")
+
+to.plot.sub1 = subset(to.plot, row.names(to.plot) %in% mod.genes1)
+to.plot.sub2 = subset(to.plot, row.names(to.plot) %in% mod.genes2)
+
+to.plot.sub = rbind(to.plot.sub1, to.plot.sub2)
+
+## make plots
+
+if(dev.cur()>1) dev.off()
+quartz(height =9, width =9, dpi =72);
+theme_set(theme_bw(44) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + theme(legend.key = element_blank()))
+update_geom_defaults("point", aes(size = 4))
+
+## 
+
+fdr = -log10(0.1) # 0.699
+up.col = c("#ca0020")
+dn.col = c("#0571b0")
+
+ggplot(to.plot, aes(x = estimate, y = -log10(q_value))) + geom_point(colour = "grey") #add individual dots
+last_plot() + geom_point(data = to.plot.sub1, aes(x = estimate, y = -log10(q_value)), colour = up.col)# alpha = 0.5
+last_plot() + geom_point(data = to.plot.sub2, aes(x = estimate, y = -log10(q_value)), colour = dn.col)#alpha = 0.5
+
+last_plot() + scale_x_continuous(limits = c(-2.5,2.5))
+#last_plot() + scale_y_continuous(limits = c(-0,1.2))
+last_plot() + labs(x = "Estimate", y = "-log10(q_value)")
+last_plot() + geom_hline(yintercept = fdr, linetype = "dotted", size = 2)
+
+labGenes1 = mod.genes1
+labGenes2 = mod.genes2
+
+labGenes = c(labGenes1, labGenes2)
+
+tLabs = subset(to.plot.sub, row.names(to.plot.sub) %in% labGenes)
+tLabs = data.frame(symbol = row.names(tLabs), tLabs)
+
+last_plot()+ geom_text_repel(aes(label = symbol), data = tLabs, size = 10, arrow = arrow(length = unit(0.02, "npc")),box.padding = 2)
+
+p = last_plot()
+
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/Figure_PDFs")
+
+filename = "FIg5A_Volcano_ plot_GEX_Cluster3_cells.pdf"
+ggsave(filename, p)

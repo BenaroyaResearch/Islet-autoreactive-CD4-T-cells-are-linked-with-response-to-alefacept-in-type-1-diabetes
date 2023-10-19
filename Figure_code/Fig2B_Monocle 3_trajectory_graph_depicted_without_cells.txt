@@ -1,0 +1,149 @@
+rm(list = ls())
+library(plyr)
+library(edgeR)
+library(compareGroups)
+library(dbscan)
+library(MAST)
+library(ggsignif)
+library(monocle3)
+library(dplyr)
+library(geosphere)
+library(RColorBrewer)
+library(gtools)
+library(ggplot2); library(reshape2); theme_set(theme_bw(26) + theme(panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank()) +
+                              theme(legend.key = element_blank()))
+update_geom_defaults("point", aes(size = 4))
+
+## override errors in circlize and Monocle3
+
+old_ops <- options(warn = 1) # if warning = 2, warning is converted to error
+options(old_ops)
+
+## load files
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/data") # folder on Desktop
+
+counts_uncorrected <- read.table("combined_counts_filtered_for_batchcorr.csv", header=TRUE,sep= ",", row.names=1)
+
+ens2hgnc = readRDS("ens2hgnc.RDS")
+
+### subset data
+
+#design = read.delim("design_for_peter.txt", stringsAsFactors = F, header=TRUE, row.names = 1)
+
+filename = "Seurat_meta.data_w_cell_identity_and_cell_cycle.csv"
+
+design = read.csv(filename, stringsAsFactors = F)
+colnames(design)[1] = c("libID")
+row.names(design) = design$libID
+
+design$libID = row.names(design)
+design$batch4 = gsub(" ","_", design$batch4)
+design$batch4 = factor(design$batch4)
+
+frozenlibs <- design$libId[ design$batch4 != "P91 fresh"]
+
+counts_uncorrected = subset(counts_uncorrected, select = colnames(counts_uncorrected) %in% design$libID)
+
+b = c("P91_frozen", "P168_frozen_1") ## remove P168-2
+#design = subset(design, design$batch4 %in% b & design$CD45RA == "FALSE") # reduce from 1994 to 946.
+design = subset(design, !design$batch4 %in% b) # 
+
+design$batch4 = as.character(design$batch4)
+design$batch4 = factor(design$batch4)
+design$CD45RA = as.character(design$CD45RA)
+design$CD45RA = factor(design$CD45RA)
+design$project = factor(design$project)
+
+exponentiated <- counts_uncorrected[,frozenlibs]
+exponentiated <- subset(exponentiated, select = colnames(exponentiated) %in% design$libID)
+gm <- data.frame( gene_short_name=ens2hgnc[rownames(exponentiated)], Ensembl.ID=rownames(exponentiated) )
+rownames(gm) <- gm$Ensembl.ID
+gm <- gm[rownames(exponentiated),]
+
+gm <- gm[rownames(exponentiated),]
+
+## load clean anno
+
+anno.clean = read.delim("P168_clean_anno_from_research_database04212020.txt", stringsAsFactors = F)
+anno.clean$libID = anno.clean$libid
+
+idKey = read.csv("T1DAL_id_key.csv", stringsAsFactors = F)
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+
+slopes.full = read.csv("T1DAL_cpeptide_rates.csv", stringsAsFactors = F)
+slopes.full[,2] = NULL
+colnames(slopes.full)[2] = c("slope")
+
+slopes = subset(slopes.full, participant_id %in% anno.clean$participant_id)
+slopes[is.na(slopes)] = -1
+slopes$rate = ifelse(slopes$slope >median(slopes$slope), "S", "F")
+slopes$libID = anno.clean$libID[match(slopes$participant_id, anno.clean$participant_id)]
+
+anno.clean$rate = slopes$rate[match(anno.clean$participant_id, slopes$participant_id)]
+anno.clean$slope = slopes$slope[match(anno.clean$participant_id, slopes$participant_id)]
+
+demo = read.delim("ADLB1_2019-04-26_10-54-53_viral_load.txt", stringsAsFactors = F)
+
+design$sorter = anno.clean$sorter[match(design$libID, anno.clean$libID)]
+design$rd = anno.clean$received_date[match(design$libID, anno.clean$libID)]
+design$rate = anno.clean$rate[match(design$libID, anno.clean$libID)]
+design$slope = anno.clean$slope[match(design$libID, anno.clean$libID)]
+design$participant_id = anno.clean$participant_id[match(design$libID, anno.clean$libID)]
+design$Treatment = demo$Treatment[match(design$participant_id, demo$Participant.ID)]
+design$cluster = NULL
+
+### load Monocle object
+
+cds = readRDS("cds_no_trajectory_P168_JCI_Insight.rds")
+
+## correct UMAP orientation. Sometimes orientation is reversed, but this is arbitrary. If necesssry, orrect by multiplying UMAP coordinates by -1.
+
+reducedDims(cds)$UMAP = -1*reducedDims(cds)$UMAP
+
+cds <- learn_graph(cds)
+
+table(colData(cds)$clusters)
+
+colData(cds)$status = cds$group
+cds$group = dplyr::recode(cds$group, "T1D early onset" = "roT1D")																						
+cds$group = gsub("T1D early onset", "eoT1D", cds$group)
+
+## rename clusters
+
+## enrichment from subsets
+#to.plot$subset = as.character(to.plot$mon.clus)
+
+colData(cds)$renamedClusters = as.character(monocle3::clusters(cds))
+colData(cds)$renamedClusters = dplyr::recode(colData(cds)$renamedClusters,
+                                                "1"="1",
+                                                "2"="5",
+                                                "3"="3",
+                                                "4"="4",
+                                                "5"="2")                                               
+colData(cds)$Clusters = colData(cds)$renamedClusters
+
+## plot renamed clusters
+
+if(dev.cur()>1) dev.off()
+quartz(width=8,height=8, dpi=72)  ### open plotting window
+
+theme_set(theme_bw(30) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + theme(legend.key = element_blank()))
+
+pal = c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a','#ffed6f','#b15928', "gray")	
+
+plot_cells(cds, color_cells_by="Clusters", cell_size = 0.001, group_label_size = 0.000001, graph_label_size = 0.0001, show_trajectory_graph = T, trajectory_graph_segment_size = 1.5, label_branch_points = F, label_cell_groups = F)
+last_plot() + scale_color_manual(values = pal, name = "cluster")# custom colors
+
+p = last_plot()
+
+## plot trajectory only
+last_plot() + scale_color_manual(values = c("white", "white", "white", "white", "white", "white", "white", "white", "white", "white", "white"), name = "cluster")
+
+last_plot() + theme(legend.position = "none")
+p = last_plot()
+ 
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/Figure_PDFs")
+filename = "Fig2B_Monocle 3_trajectory_graph_depicted_without_cells.pdf"
+ggsave(filename, p)

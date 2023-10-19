@@ -1,0 +1,361 @@
+rm(list = ls())
+library(plyr)
+library(edgeR)
+library(compareGroups)
+library(dbscan)
+library(MAST)
+library(ggsignif)
+library(monocle3)
+library(dplyr)
+library(geosphere)
+library(RColorBrewer)
+library(gtools)
+library(ggplot2); library(reshape2); theme_set(theme_bw(26) + theme(panel.grid.major = element_blank(), 
+                                                 panel.grid.minor = element_blank()) +
+                              theme(legend.key = element_blank()))
+update_geom_defaults("point", aes(size = 4))
+
+## override errors in circlize and Monocle3
+
+old_ops <- options(warn = 1) # if warning = 2, warning is converted to error
+options(old_ops)
+
+## load files
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/data") # folder on Desktop
+
+counts_uncorrected <- read.table("combined_counts_filtered_for_batchcorr.csv", header=TRUE,sep= ",", row.names=1)
+
+ens2hgnc = readRDS("ens2hgnc.RDS")
+
+### subset data
+
+#design = read.delim("design_for_peter.txt", stringsAsFactors = F, header=TRUE, row.names = 1)
+
+filename = "Seurat_meta.data_w_cell_identity_and_cell_cycle.csv"
+
+design = read.csv(filename, stringsAsFactors = F)
+colnames(design)[1] = c("libID")
+row.names(design) = design$libID
+
+design$libID = row.names(design)
+design$batch4 = gsub(" ","_", design$batch4)
+design$batch4 = factor(design$batch4)
+
+frozenlibs <- design$libId[ design$batch4 != "P91 fresh"]
+
+counts_uncorrected = subset(counts_uncorrected, select = colnames(counts_uncorrected) %in% design$libID)
+
+b = c("P91_frozen", "P168_frozen_1") ## remove P168-2
+#design = subset(design, design$batch4 %in% b & design$CD45RA == "FALSE") # reduce from 1994 to 946.
+design = subset(design, !design$batch4 %in% b) # 
+
+design$batch4 = as.character(design$batch4)
+design$batch4 = factor(design$batch4)
+design$CD45RA = as.character(design$CD45RA)
+design$CD45RA = factor(design$CD45RA)
+design$project = factor(design$project)
+
+exponentiated <- counts_uncorrected[,frozenlibs]
+exponentiated <- subset(exponentiated, select = colnames(exponentiated) %in% design$libID)
+gm <- data.frame( gene_short_name=ens2hgnc[rownames(exponentiated)], Ensembl.ID=rownames(exponentiated) )
+rownames(gm) <- gm$Ensembl.ID
+gm <- gm[rownames(exponentiated),]
+
+gm <- gm[rownames(exponentiated),]
+
+## load clean anno
+
+anno.clean = read.delim("P168_clean_anno_from_research_database04212020.txt", stringsAsFactors = F)
+anno.clean$libID = anno.clean$libid
+
+idKey = read.csv("T1DAL_id_key.csv", stringsAsFactors = F)
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+anno.clean$participant_id = idKey$Participant_id[match(anno.clean$donor_id, idKey$SubjectID)]
+
+slopes.full = read.csv("T1DAL_cpeptide_rates.csv", stringsAsFactors = F)
+slopes.full[,2] = NULL
+colnames(slopes.full)[2] = c("slope")
+
+slopes = subset(slopes.full, participant_id %in% anno.clean$participant_id)
+slopes[is.na(slopes)] = -1
+slopes$rate = ifelse(slopes$slope >median(slopes$slope), "S", "F")
+slopes$libID = anno.clean$libID[match(slopes$participant_id, anno.clean$participant_id)]
+
+anno.clean$rate = slopes$rate[match(anno.clean$participant_id, slopes$participant_id)]
+anno.clean$slope = slopes$slope[match(anno.clean$participant_id, slopes$participant_id)]
+
+demo = read.delim("ADLB1_2019-04-26_10-54-53_viral_load.txt", stringsAsFactors = F)
+
+design$sorter = anno.clean$sorter[match(design$libID, anno.clean$libID)]
+design$rd = anno.clean$received_date[match(design$libID, anno.clean$libID)]
+design$rate = anno.clean$rate[match(design$libID, anno.clean$libID)]
+design$slope = anno.clean$slope[match(design$libID, anno.clean$libID)]
+design$participant_id = anno.clean$participant_id[match(design$libID, anno.clean$libID)]
+design$Treatment = demo$Treatment[match(design$participant_id, demo$Participant.ID)]
+design$cluster = NULL
+
+### load Monocle object
+
+cds = readRDS("cds_no_trajectory_P168_JCI_Insight.rds")
+
+## correct UMAP orientation. Sometimes orientation is reversed, but this is arbitrary. If necesssry, orrect by multiplying UMAP coordinates by -1.
+
+reducedDims(cds)$UMAP = -1*reducedDims(cds)$UMAP
+
+#######################################
+## circos plots
+
+## subset TCRs to cells in Monocle object
+
+tcrs = readRDS("cds_scanorama_batch4_tcrs.rds")
+tcrs = tcrs[c("libid", "v_gene", "j_gene", "junction")]
+colnames(tcrs) = c("libID", "V.gene", "J.gene", "junction") # 5722
+
+anno.tcrs = readRDS("cds_scanorama_batch4_tcrs.rds")
+colnames(anno.tcrs) = gsub("v_gene", "V.gene", colnames(anno.tcrs))
+colnames(anno.tcrs) = gsub("j_gene", "J.gene", colnames(anno.tcrs))
+colnames(anno.tcrs) = gsub("junction", "junction", colnames(anno.tcrs))
+colnames(anno.tcrs) = gsub("libid", "libID", colnames(anno.tcrs)) # 5722
+
+anno = anno.tcrs[!duplicated(anno.tcrs$libID),]
+colnames(anno) = gsub("v_gene", "V.gene", colnames(anno))
+colnames(anno) = gsub("j_gene", "J.gene", colnames(anno))
+colnames(anno) = gsub("junction", "junctions", colnames(anno))
+colnames(anno) = gsub("libid", "libID", colnames(anno)) # 3047
+
+## subset TCRs to cells in Monocle object
+
+anno.tcrs = subset(anno.tcrs, libID %in% cds$libID) # 5722 reduced to 1954
+anno = subset(anno, libID %in% cds$libID) # 3047 reduced to 993
+
+#anno.tcrs = anno.tcrs[!duplicated(anno.tcrs$libID),] # 993
+
+## add cluster info from colData(cds)
+
+df = data.frame(colData(cds))
+anno.tcrs$Cluster = df$Cluster[match(anno.tcrs$libID, row.names(df))] # 1954 total
+
+## measure TCR expansion
+
+cut <- 2
+no = ddply(anno.tcrs,.(V.gene, J.gene,full_nt_sequence), plyr::summarize, sum = length(full_nt_sequence))
+no.sub = subset(no, sum>=cut)
+no.not.sub = subset(no, sum<cut)
+
+E = subset(anno.tcrs, full_nt_sequence %in% no.sub$full_nt_sequence) # 230
+NE = subset(anno.tcrs, !full_nt_sequence %in% E$full_nt_sequence) # 1724
+E.cell = subset(anno, anno$libID %in% E$libID) # 122
+NE.cell = subset(anno, !anno$libID %in% E$libID) # 871
+
+E.cell.u = E.cell[!duplicated(E.cell$libID),] # 145
+NE.cell.u = NE.cell[!duplicated(NE.cell$libID),] # 848
+
+### reconstruct anno.tcrs 
+
+anno.tcrs.1 = subset(anno.tcrs, Cluster == "1") # 439
+anno.tcrs.2 = subset(anno.tcrs, Cluster == "2") # 246
+anno.tcrs.3 = subset(anno.tcrs, Cluster == "3") # 500
+anno.tcrs.4 = subset(anno.tcrs, Cluster == "4") # 404
+anno.tcrs.5 = subset(anno.tcrs, Cluster == "5") # 365
+
+## subset to unique libIDs
+
+anno.tcrs.1 = anno.tcrs.1[!duplicated(anno.tcrs.1$libID),] # 229
+anno.tcrs.2 = anno.tcrs.2[!duplicated(anno.tcrs.2$libID),] # 122
+anno.tcrs.3 = anno.tcrs.3[!duplicated(anno.tcrs.3$libID),] # 251
+anno.tcrs.4 = anno.tcrs.4[!duplicated(anno.tcrs.4$libID),] # 208
+anno.tcrs.5 = anno.tcrs.5[!duplicated(anno.tcrs.5$libID),] # 183
+
+## recombine in order of Cluster no.
+
+anno.sub  = rbind(anno.tcrs.1, anno.tcrs.2, anno.tcrs.3, anno.tcrs.4, anno.tcrs.5) # 993
+
+#### prepare circos plots
+ 
+sub = subset(anno.tcrs, libID %in%  E.cell$libID) # 246 expanded, 122 unique (i.e., number of E.cells)
+
+##### trim TCR sequences
+melt.tcrs = sub[,] # 246
+melt.tcrs = melt.tcrs[c("libID", "V.gene", "junction", "Cluster", "full_nt_sequence")]
+melt.tcrs$junction = as.character(melt.tcrs$junction) # 246, 122 unique cells
+
+###### combine orig and dest using nt sequence as key
+
+melt.join = merge(melt.tcrs, melt.tcrs, by = "full_nt_sequence", stringsAsFactors = F) # 
+melt.join = subset(melt.join, ! libID.x == libID.y) # 1730, 74 unique cells
+
+## restrict to cluster 3 (comment out to remove this restriction)
+
+clus = 1
+melt.join = subset(melt.join, Cluster.x == clus | Cluster.y == clus) # 
+all(melt.join$junction.x == melt.join$junction.y) # TRUE
+
+## limit variables
+
+melt.join = melt.join[c(1,2,6)]
+colnames(melt.join) = c("junction", "orig", "dest") # 763
+
+##### remove duplicated records 
+
+mju = melt.join # 763
+mju = mju[!duplicated(mju[,]),] # 763
+mju = subset(mju, !orig == dest) # 694, 90 unique
+mju$od1 = paste0(mju$orig, mju$dest)
+mju$od2 = paste0(mju$dest, mju$orig)
+
+#### tabulate repeated pairings for df2
+
+table.mju = ddply(mju,.(orig, dest, od1, od2), plyr::summarize, numdup1 = length(od1), numdup2 = length(od2))
+all(table.mju$numdup1 == table.mju$numdup2) # TRUE
+
+table.mju$orig = as.character(table.mju$orig)
+table.mju$dest = as.character(table.mju$dest)
+table.set = subset(table.mju, table.mju$orig %in% sub$libID | table.mju$dest %in% sub$libID) # 376
+
+df2 = data.frame(orig = as.character(table.set$orig), dest = as.character(table.set$dest), m = as.numeric(table.set$numdup1)) # 376
+
+### create m from df2
+
+m = reshape2::dcast(df2, orig~dest)
+m[is.na(m)] = 0
+
+row.names(m) = m[,1]
+m = m[,-1]
+
+m = m[order(row.names(m)),]
+m = data.frame(m)
+m = as.matrix(m)
+
+## create reference data.frame (df1) with for details on each sample. Need to sort libIDs alphanumerically
+
+libs = data.frame((anno.sub$libID), stringsAsFactors = F) # 993
+libs = unique(libs) # 993
+colnames(libs)[1] = c("libID")
+
+#
+pal = c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a','#ffed6f','#b15928', "gray")	
+
+color = ifelse(libs$libID %in% anno.tcrs.1$libID, "166,206,227",	
+			ifelse(libs$libID %in% anno.tcrs.2$libID, "31,120,180",	
+				ifelse(libs$libID %in% anno.tcrs.3$libID, "178,223,138",	
+					ifelse(libs$libID %in% anno.tcrs.4$libID, "51,160,44",	
+						ifelse(libs$libID %in% anno.tcrs.5$libID, "251,154,153",	"black")))))
+
+df1 = data.frame(orig = libs[,1], color = color)
+df1$orig = as.character(df1$orig)
+
+df1$orig <- factor(df1$orig, levels= libs[,1])
+df1 = df1[(!duplicated(df1$orig)),] # 993
+
+####### 
+
+df1$order = seq(1:nrow(df1))
+row.names(df1) = seq(1:nrow(df1))
+
+##sort order of data.frame and matrix by libID for plotting in circos. Need to uses alphanumeric sorting.
+##
+##define ranges of circos sectors and their colors (both of the sectors and the links)
+##
+
+df1$xmin <- 0
+df1$xmax = nrow(df1)
+
+n<-nrow(df1)
+
+#df1$sum1 <- rowSums(m)
+df1$sum = nrow(m) + ncol(m)
+df1$sum2 <- numeric(n)
+
+rgb = as.character(df1$color)
+df1$color = rgb
+
+df1 <- cbind(df1, matrix(as.numeric(unlist(strsplit(df1$color,","))),nrow=n, byrow=TRUE) )
+names(df1)[ncol(df1)-2:0]<-c("r","g","b")
+df1$rcol<-rgb(df1$r, df1$g, df1$b, max = 255)
+df1$lcol<-rgb(df1$r, df1$g, df1$b, alpha=200, max = 255)
+
+#######
+if(dev.cur()>1) dev.off()
+quartz(width=7,height=7,dpi=72)  ### open plotting window
+
+library(circlize)
+par(mar=rep(0,4))
+circos.clear()
+
+#basic circos graphic parameters
+circos.par(cell.padding=c(0,0,0,0), track.margin=c(0,0.15), start.degree = 90, gap.degree =0)
+
+#sector details
+circos.initialize(factors = df1$orig, xlim = cbind(df1$xmin, df1$xmax))
+
+#plot sectors
+circos.trackPlotRegion(ylim = c(0, 1), factors = df1$orig, track.height=0.1,
+ #panel.fun for each sector
+ panel.fun = function(x, y) {
+   #select details of current sector
+   name = get.cell.meta.data("sector.index")
+   i = get.cell.meta.data("sector.numeric.index")
+   xlim = get.cell.meta.data("xlim")
+   ylim = get.cell.meta.data("ylim")
+
+   #plot labels
+   circos.text(x=mean(xlim), y=2.2, labels=name, direction = "arc", cex=0.002)
+
+   #plot main sector
+   circos.rect(xleft=xlim[1], ybottom=ylim[1], xright=xlim[2], ytop=ylim[2], col = df1$rcol[i], border=df1$rcol[i])
+
+   #blank in part of main sector
+   #circos.rect(xleft=xlim[1], ybottom=ylim[1], xright=xlim[2]-rowSums(m)[i], ytop=ylim[1]+0.3, col = "white", border = "white")
+
+   #white line all the way around
+   #circos.rect(xleft=xlim[1], ybottom=0.3, xright=xlim[2], ytop=0.32, col = "white", border = "white")
+
+   #plot axis
+   circos.axis(labels.cex=0.006, major.at=seq(from=0,to=floor(df1$xmax)[i],by=500)) #, labels.away.percentage = 0.15
+})
+
+##
+##plot links
+##
+#add sum values to df1, marking the x-position of the first links out (sum1) and in (sum2). Updated for further links in loop below.
+df1$sum1 <- nrow(m)
+#df1$sum1 <- colSums(m)
+df1$sum2 <- numeric(n)
+
+#create a data.frame of matrix sorted by element size, to allow largest plotted first
+
+### load df2
+df2.levs = mixedsort(df2$orig)
+df2.levs = as.character(df2.levs)
+
+df2$orig = as.character(df2$orig)
+df2$dest = as.character(df2$dest)
+df2 = df2[order(df2$orig),]
+
+########plot links
+for(k in 1:nrow(df2)){
+  #i,j reference of flow matrix
+  i<-match(df2$orig[k],df1$orig)
+  j<-match(df2$dest[k],df1$orig)
+#j<-match(df2$dest[k],colnames(m))
+
+  #plot link
+  circos.link(sector.index1=df1$orig[i], point1=c(df1$sum1[i]),
+	sector.index2=df1$orig[j], point2=c(df1$sum1[j]),
+		col = "#808080", rou1=0.74, rou2=0.75, lwd = (df2$m[k]*1.5), h.ratio = 0.2) # replace "#808080" with this: df1$lcol[i]
+		
+		
+  #update sum1 and sum2 for use when plotting the next link
+  #df1$sum1[i] = df1$sum1[i] + abs(m[i, j])
+  #df1$sum2[j] = df1$sum2[j] + abs(m[i, j])
+}
+
+legend("bottomright", unique(unique(anno.sub$Cluster)), lwd = 10, col = c("#a6cee3","#1f78b4", "#b2df8a", "#33a02c",	"#fb9a99"), cex = 1.5, bty = "n", title = "cluster");
+
+setwd("/Users/peterlinsley/Desktop/Balmas_et_al_code/Figure_PDFs")
+
+filename = paste0("Fig3B", clus, "_circos_plots_by_cluster.pdf")
+dev.copy2pdf(file= filename)
+dev.off()
+
+
